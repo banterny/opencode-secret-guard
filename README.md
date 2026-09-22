@@ -12,6 +12,18 @@ are missing or the directory is not a git repo.
 
 No secrets are stored in this repo. Tests generate fake tokens at runtime.
 
+## Why this instead of a general secret-scan-everything hook
+
+Hooks that scan *every* Bash call pay their cost in the wrong place: the
+check that matters — scanning a diff for secrets before it enters git
+history — only applies to the rare `git commit`/`git push`, yet a
+scan-everything hook runs its full pipeline on every `ls`, `cat`, and
+`npm install` too.
+
+This plugin matches on the command *before* deciding whether to scan
+anything, so non-git Bash calls return immediately (no gitleaks fork),
+and the gitleaks scan only runs on an actual commit/push.
+
 ## Prereqs (each machine)
 
 ```sh
@@ -53,11 +65,24 @@ Trigger matching is deliberately loose (word `git` + word `commit`/`push`
 anywhere in the command). Over-matching just costs one fast scan;
 under-matching could leak a secret into history.
 
-## Test on a new machine
+## Test
 
-In a scratch repo (never a real one), stage a file containing a fake
-token and ask the agent to commit — it should be blocked with a
-`Blocked by secret-guard…` message. Clean files should commit normally.
+```sh
+./test-scan.sh
+```
+
+Builds a real scratch repo and exercises the exact gitleaks commands the
+plugin shells out to — staged/unstaged/tip-commit secrets plus clean
+counterparts. No network access, nothing touches your real repos. (It
+tests the scan layer; end-to-end hook behavior needs a running OpenCode
+session.)
+
+For end-to-end on a new machine: in a scratch repo (never a real one),
+stage a file containing a fake token and ask the agent to commit — it
+should be blocked with a `Blocked by secret-guard…` message. Clean files
+should commit normally.
+
+Tested on macOS with gitleaks 8.30.1 and OpenCode 1.18.x.
 
 ## Limitations
 
