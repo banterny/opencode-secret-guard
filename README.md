@@ -96,4 +96,4 @@ Tested on macOS with gitleaks 8.30.1 and OpenCode 1.18.x.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
