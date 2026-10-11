@@ -4,10 +4,11 @@
 # shells out to — trigger-adjacent logic (commit vs commit -a vs push)
 # plus clean/blocked outcomes. No network access, nothing touches real repos.
 #
-# NOTE: this tests the gitleaks scan commands, not the plugin hook itself
-# (the hook needs a running OpenCode session). For end-to-end, stage a file
-# with a fake token in a scratch repo and ask the agent to commit — it
-# should be blocked with a `Blocked by secret-guard…` message.
+# NOTE: this tests the gitleaks scan commands, not the plugin itself — see
+# test-plugin.mjs for that. For end-to-end (needs a running OpenCode
+# session), stage a file with a fake token in a scratch repo and ask the
+# agent to commit — it should be blocked with a `Blocked by secret-guard…`
+# message.
 set -u
 pass=0
 fail=0
@@ -38,16 +39,15 @@ check() { # $1 = expected exit (0|1), $2 = description, $3... = command
   fi
 }
 
-check_pipe() { # $1 = expected exit, $2 = description; the plugin's commit -a scans, in order, stopping at the first non-zero exit
+check_pipe() { # $1 = expected exit, $2 = description; the plugin's commit -a scans: staged first, then the wider scan unless a leak was already found
   local expected="$1" desc="$2" rc
   gitleaks git --pre-commit --staged --no-banner --redact --no-color >/dev/null 2>&1
   rc=$?
-  if [ "$rc" = "0" ]; then
-    git diff --no-ext-diff --no-color 2>/dev/null | gitleaks stdin --no-banner --redact --no-color >/dev/null 2>&1
-    rc=$?
-  fi
-  if [ "$rc" = "0" ]; then
-    git ls-files --others --exclude-standard -z -- :/ 2>/dev/null | xargs -0 cat -- 2>/dev/null | gitleaks stdin --no-banner --redact --no-color >/dev/null 2>&1
+  if [ "$rc" != "1" ]; then
+    {
+      git diff --no-ext-diff --no-color
+      git ls-files --others --exclude-standard -z -- ':/' | xargs -0 cat --
+    } 2>/dev/null | gitleaks stdin --no-banner --redact --no-color >/dev/null 2>&1
     rc=$?
   fi
   if [ "$rc" = "$expected" ]; then
@@ -96,8 +96,8 @@ check 1 "secret tip commit (push) -> block" gitleaks git --no-banner --redact --
 # (The plugin also reaches this scan for commands that are not commits at
 # all — e.g. a file search naming `.git` and a file with "commit" in its
 # name, plus a flag such as `-name`. That is a trigger decision inside the
-# plugin, which this harness cannot drive; at scan level it is the same
-# case as the first check below.)
+# plugin, which test-plugin.mjs covers; at scan level it is the same case
+# as the first check below.)
 REPO2=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX")
 cd "$REPO2" || exit 1
 git init -q
