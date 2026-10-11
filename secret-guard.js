@@ -3,7 +3,7 @@
 // detected with gitleaks. Only scans on actual commit/push; all other Bash
 // calls return in ~ms with no scan.
 //
-// Install: requires `gitleaks` on PATH (`brew install gitleaks`).
+// Install: requires `gitleaks` 8.19.0+ on PATH (`brew install gitleaks`).
 // Loaded automatically from ~/.config/opencode/plugins/ (global) after restart.
 // Fails open (allow) when gitleaks/git are unavailable or cwd is not a repo.
 
@@ -52,12 +52,24 @@ export const SecretGuard = async ({ $, directory }) => {
 
       if (isCommit) {
         try {
+          // The staged scan always runs, so the wider scan can only add coverage.
+          await $`gitleaks git --pre-commit --staged --no-banner --redact --no-color`.cwd(
+            cwd
+          ).quiet();
           if (isAllFlag(cmd)) {
-            await $`git diff HEAD | gitleaks detect --no-git --pipe --no-banner --redact --no-color`.cwd(
+            // Wider scan: what is not staged yet but could still end up in
+            // this commit — unstaged changes to tracked files (`git diff`,
+            // which unlike `git diff HEAD` also works before the first
+            // commit), plus untracked files that are not git-ignored (a
+            // `git add --all` chained ahead of the commit hasn't run yet
+            // when this hook fires). Piped into `gitleaks stdin` so only
+            // that text is scanned: `detect --no-git --pipe` ignores the
+            // pipe and scans the whole folder, git-ignored build output
+            // included.
+            await $`git diff --no-ext-diff --no-color | gitleaks stdin --no-banner --redact --no-color`.cwd(
               cwd
             ).quiet();
-          } else {
-            await $`gitleaks protect --staged --no-banner --redact --no-color`.cwd(
+            await $`git ls-files --others --exclude-standard -z -- :/ | xargs -0 cat -- | gitleaks stdin --no-banner --redact --no-color`.cwd(
               cwd
             ).quiet();
           }
@@ -86,7 +98,7 @@ export const SecretGuard = async ({ $, directory }) => {
           }
         }
         try {
-          await $`gitleaks detect --no-banner --redact --no-color --log-opts=${range}`.cwd(cwd).quiet();
+          await $`gitleaks git --no-banner --redact --no-color --log-opts=${range}`.cwd(cwd).quiet();
         } catch (e) {
           if (e?.exitCode === 1) {
             throw new Error(
