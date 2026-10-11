@@ -40,11 +40,28 @@ mkdir -p ~/.config/opencode/plugins
 cp secret-guard.js ~/.config/opencode/plugins/secret-guard.js
 ```
 
-Then quit and restart OpenCode. Verify it loads:
+Then restart OpenCode's background server so it picks the file up:
 
 ```sh
-opencode debug info   # should list .../plugins/secret-guard.js
+opencode service restart
 ```
+
+### Verify it loads
+
+```sh
+opencode plugin list
+```
+
+The row for `.../plugins/secret-guard.js` must show `secret-guard` in the
+`ID` column. A `-` there means OpenCode found the file but refused to load
+it, and **the guard is not running**; the reason is in OpenCode's log
+(`opencode debug paths` shows where) as `failed to load plugin`. The first
+`plugin list` in a folder can come back before loading has finished — run
+it twice.
+
+This matters because OpenCode 2 changed the plugin format: a plugin written
+for OpenCode 1 is silently skipped, not loaded. This file is written for
+OpenCode 2 and also carries the OpenCode 1 entry point (1.18.29 or later).
 
 ## Install (single project only)
 
@@ -53,7 +70,7 @@ mkdir -p .opencode/plugins
 cp secret-guard.js .opencode/plugins/secret-guard.js
 ```
 
-Restart OpenCode.
+Restart OpenCode's background server and verify as above.
 
 ## What it blocks
 
@@ -75,21 +92,31 @@ under-matching could leak a secret into history.
 
 ```sh
 ./test-scan.sh
+node test-plugin.mjs
 ```
 
-Builds a real scratch repo and exercises the exact gitleaks commands the
-plugin shells out to — staged/unstaged/untracked/tip-commit secrets plus
-clean counterparts, a secret in a git-ignored build folder (must not
-block), and a repo with no commits yet. No network access, nothing touches your real repos. (It
-tests the scan layer; end-to-end hook behavior needs a running OpenCode
-session.)
+`test-scan.sh` builds a real scratch repo and exercises the exact gitleaks
+commands the plugin shells out to — staged/unstaged/untracked/tip-commit
+secrets plus clean counterparts, a secret in a git-ignored build folder
+(must not block), and a repo with no commits yet.
+
+`test-plugin.mjs` tests the plugin file itself: that it has the shape
+OpenCode 2 will load, and that its hook allows and blocks the right
+commands in scratch repos (including a file search that merely mentions
+`.git` and "commit", which must not block).
+
+No network access, nothing touches your real repos. Neither test proves
+that a running OpenCode has loaded the plugin — see "Verify it loads".
 
 For end-to-end on a new machine: in a scratch repo (never a real one),
 stage a file containing a fake token and ask the agent to commit — it
 should be blocked with a `Blocked by secret-guard…` message. Clean files
 should commit normally.
 
-Tested on macOS with gitleaks 8.30.1 and OpenCode 1.18.x.
+Tested on macOS with gitleaks 8.30.1 and OpenCode 2.0.25/2.0.26, including
+a real session being blocked. The OpenCode 1
+entry point is carried over from the earlier version of this plugin and has
+not been re-tested against a real OpenCode 1 install.
 
 ## Limitations
 
