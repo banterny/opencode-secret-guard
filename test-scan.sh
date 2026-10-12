@@ -13,6 +13,12 @@ set -u
 pass=0
 fail=0
 
+# Hermetic: ignore the user's and the system's git config, so the fixture
+# commits below are not refused by a globally installed git hook (such as
+# the pre-commit hook from claude-code-secret-guard, via core.hooksPath).
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+
 # Generated at runtime, not a literal, so this file itself never contains a
 # real token-shaped string (it would trip gitleaks/GitHub push protection).
 TOK="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"

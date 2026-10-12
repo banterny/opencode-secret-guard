@@ -15,6 +15,12 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Hermetic: ignore the user's and the system's git config, so the fixture
+// commits below are not refused by a globally installed git hook (such as
+// the pre-commit hook from claude-code-secret-guard, via core.hooksPath).
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+
 // Generated at runtime, not a literal, so this file itself never contains a
 // real token-shaped string (it would trip gitleaks/GitHub push protection).
 const TOK =
