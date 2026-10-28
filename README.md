@@ -10,6 +10,11 @@ It only scans on actual commit/push — every other Bash call returns in
 milliseconds with no scan — and fails open (allows) when `gitleaks`/`git`
 are missing or the directory is not a git repo.
 
+> Want to stop personal data (your email address, for instance) leaking out of
+> an agent into web requests as well? See
+> [agent-privacy-guard](https://github.com/banterny/agent-privacy-guard), for
+> OpenCode, Claude Code and Codex.
+
 No secrets are stored in this repo. Tests generate fake tokens at runtime.
 
 ## Why this instead of a general secret-scan-everything hook
