@@ -12,6 +12,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -302,6 +303,34 @@ git(g5, "commit", "-qm", "fixture: leak commit");
 git(g5, "checkout", "-q", "-");
 await check("block", g5, "git push origin feature");
 await check("block", g5, "git push --all");
+// a push from a detached HEAD (the commit is on no branch)
+git(g5, "checkout", "-q", "--detach");
+writeFileSync(join(g5, "detached.txt"), `TOKEN=${TOK}\n`);
+git(g5, "add", "detached.txt");
+git(g5, "commit", "-qm", "fixture: leak on a detached HEAD");
+git(g5, "branch", "-q", "-D", "feature");
+await check("block", g5, "git push origin HEAD:main");
+
+// a decoy cd or -C into a folder that is not a repo
+const g6 = repoWith("decoy");
+writeFileSync(join(g6, "s.txt"), `TOKEN=${TOK}\n`);
+git(g6, "add", "s.txt");
+const notRepo = join(g6, "..", "not-a-repo");
+mkdirSync(notRepo);
+await check("block", g6, `cd "${notRepo}" && cd "${g6}" && git commit -m x`);
+await check("block", g6, `git -C "${notRepo}" status; git commit -m x`);
+
+// a settings file that is a link to a file outside the repo
+const g7 = repoWith("linked-settings");
+const outsideToml = join(g7, "..", "outside.toml");
+writeFileSync(outsideToml, "[extend]\nuseDefault = true\n");
+symlinkSync(outsideToml, join(g7, ".gitleaks.toml"));
+git(g7, "add", ".gitleaks.toml");
+git(g7, "commit", "-qm", "fixture: settings as a link");
+writeFileSync(outsideToml, ALLOW_ALL);
+writeFileSync(join(g7, "s.txt"), `TOKEN=${TOK}\n`);
+git(g7, "add", "s.txt");
+await check("block", g7, 'git commit -m "x"');
 
 console.log(`\npassed: ${pass}, failed: ${fail}`);
 for (const dir of repos) rmSync(dir, { recursive: true, force: true });

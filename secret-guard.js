@@ -28,27 +28,34 @@ const isWide = (cmd) =>
   /(^|\s)(--all|--include|--only|-[a-zA-Z]*[aio][a-zA-Z]*)(\s|$)/.test(cmd) ||
   /(^|[^a-zA-Z0-9_])git(\s+-\S+(\s+[^-\s]\S*)?)*\s+(add|stage)(\s|$)/.test(cmd);
 
-// The folder the command will act on: a leading `cd <dir> &&` (or `;`), then
-// a `git -C <dir>`, each relative to where the command starts. A folder may
-// be quoted. Anything cleverer than that is left to the git-level hooks.
+// Which folders the command may act on: where it starts, plus the folder of
+// a leading `cd <dir> &&` (or `;`) and of a `git -C <dir>`, each relative to
+// where it applies. A folder may be quoted. All of them are scanned, and any
+// finding blocks, so a decoy `cd` cannot steer the scan away from the repo
+// the commit really lands in. Anything cleverer than that is left to the
+// git-level hooks.
 const DIR = String.raw`(?:"([^"]*)"|'([^']*)'|([^\s;&|"']+))`;
 const CD_RE = new RegExp(String.raw`^\s*cd\s+${DIR}\s*(?:&&|;)`);
 const GIT_C_RE = new RegExp(String.raw`(?:^|[^a-zA-Z0-9_])git\s+-C\s+${DIR}`);
 const expandHome = (d) =>
   d === "~" ? os.homedir() : d.startsWith("~/") ? path.join(os.homedir(), d.slice(2)) : d;
-function targetDir(cmd, cwd) {
-  let dir = cwd;
+function candidateDirs(cmd, cwd) {
+  const dirs = [cwd];
+  let base = cwd;
   for (const re of [CD_RE, GIT_C_RE]) {
     const m = re.exec(cmd);
     const d = m && (m[1] ?? m[2] ?? m[3]);
     if (!d) continue;
-    const next = path.resolve(dir, expandHome(d));
-    // A folder that isn't there leaves the command where it started.
+    const next = path.resolve(base, expandHome(d));
+    // A folder that isn't there adds nothing.
     try {
-      if (statSync(next).isDirectory()) dir = next;
+      if (statSync(next).isDirectory()) {
+        dirs.push(next);
+        base = next;
+      }
     } catch {}
   }
-  return dir;
+  return dirs;
 }
 
 // The scans are fixed shell scripts, the same commands deny-secret-commit.sh
@@ -59,10 +66,11 @@ const GITLEAKS_FLAGS = "--no-banner --redact --no-color --ignore-gitleaks-allow"
 
 // gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it scans
 // and skips whatever they tell it to, so anyone who can edit them can switch
-// the scan off. Only copies exactly as committed are trusted: this prints
-// any that are new, changed or uncommitted.
+// the scan off. Only copies exactly as committed are trusted, and never a
+// link, whose target git does not track: this prints any others.
 const UNSETTLED_SETTINGS = `for f in .gitleaks.toml .gitleaksignore; do
-  { [ -e "$f" ] || [ -L "$f" ]; } || continue
+  [ -L "$f" ] && { printf '%s\\n' "$f"; continue; }
+  [ -e "$f" ] || continue
   git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
     git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
   printf '%s\\n' "$f"
@@ -88,12 +96,13 @@ const WIDER_SCAN = `{
   git ls-files --others --exclude-standard -z -- ':/' | xargs -0 cat --
 } 2>/dev/null | gitleaks stdin ${GITLEAKS_FLAGS} 2>&1`;
 
-// Every commit on a local branch or tag that no remote has yet. Reading the
-// command for which branches it pushes is easy to get wrong, so this covers
-// them all; the cost is that a secret on an unpushed branch also blocks
-// pushing another. With no remote-tracking branches at all, that is the
-// whole history, which is what a first push publishes.
-const PUSH_SCAN = `gitleaks git ${GITLEAKS_FLAGS} --log-opts="--branches --tags --not --remotes" 2>&1`;
+// Every commit on HEAD (even when it is not on a branch), a local branch or
+// a tag that no remote has yet. Reading the command for which branches it
+// pushes is easy to get wrong, so this covers them all; the cost is that a
+// secret on an unpushed branch also blocks pushing another. With no
+// remote-tracking branches at all, that is the whole history, which is what
+// a first push publishes.
+const PUSH_SCAN = `gitleaks git ${GITLEAKS_FLAGS} --log-opts="HEAD --branches --tags --not --remotes" 2>&1`;
 
 // gitleaks also takes its settings from these environment variables, which
 // would let them replace the rules the scans rely on.
@@ -128,7 +137,7 @@ function sh(script, cwd) {
 }
 
 const settingsReason = (files) =>
-  `Blocked by secret-guard: gitleaks's settings file(s) ${[...new Set(files.split("\n").filter(Boolean))].join(" ")} are new or changed, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves.`;
+  `Blocked by secret-guard: gitleaks's settings file(s) ${[...new Set(files.split("\n").filter(Boolean))].join(" ")} are new, changed or a link, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves.`;
 
 // Returns the reason to block `cmd` when run in `cwd`, or null to allow it.
 // gitleaks exits 1 when it finds a leak; anything else (missing binary, git
@@ -143,14 +152,24 @@ async function blockReason(cmd, cwd) {
   const isPush = hasWord(cmd, "git") && hasWord(cmd, "push");
   if (!isCommit && !isPush) return null;
 
-  // Not inside a git work tree -> allow (matches deny-secret-commit.sh).
-  // Scans run from the top of the work tree: from a subfolder, gitleaks only
-  // looks at that subfolder's changes, and reads its settings files there.
-  const top = await sh("git rev-parse --show-toplevel", targetDir(cmd, cwd));
-  if (top.code !== 0) return null;
-  const root = top.out.trim();
-  if (!root) return null;
+  // The top of each work tree among the candidate folders; none -> allow
+  // (matches deny-secret-commit.sh). Scans run from there: from a subfolder,
+  // gitleaks only looks at that subfolder's changes, and reads its settings
+  // files there.
+  const roots = new Set();
+  for (const dir of candidateDirs(cmd, cwd)) {
+    const top = await sh("git rev-parse --show-toplevel", dir);
+    if (top.code === 0 && top.out.trim()) roots.add(top.out.trim());
+  }
+  for (const root of roots) {
+    const reason = await repoReason(cmd, root, isCommit, isPush);
+    if (reason) return reason;
+  }
+  return null;
+}
 
+// The reason to block `cmd` in the work tree whose top is `root`, or null.
+async function repoReason(cmd, root, isCommit, isPush) {
   if (isCommit) {
     const settings = await sh(COMMIT_SETTINGS, root);
     if (settings.out.trim()) return settingsReason(settings.out);
@@ -167,7 +186,7 @@ async function blockReason(cmd, cwd) {
     if (settings.out.trim()) return settingsReason(settings.out);
     const scan = await sh(PUSH_SCAN, root);
     if (scan.code === 1) {
-      return `Blocked by secret-guard: commit(s) on local branches or tags that are not on any remote yet appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user.\n${scan.out}`;
+      return `Blocked by secret-guard: commit(s) that are not on any remote yet appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user.\n${scan.out}`;
     }
   }
 
