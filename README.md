@@ -79,15 +79,36 @@ Restart OpenCode's background server and verify as above.
 
 ## What it blocks
 
-- `git commit` — scans the staged diff (`gitleaks git --pre-commit --staged`).
-- `git commit -a` / `-am` / `--all` — also scans unstaged changes to
-  tracked files and untracked files that aren't git-ignored (piped into
-  `gitleaks stdin`), since those flags — or a `git add --all` chained ahead
-  of the commit — fold in changes `--staged` can't see yet. Git-ignored
-  files (build output such as `.next/`) can't be committed and are never
-  scanned.
-- `git push` — scans commits not yet on the upstream branch
-  (falls back to `origin/HEAD`, then to the tip commit).
+- `git commit` — scans the staged diff (`gitleaks git --pre-commit --staged`),
+  from the top of the repo, so a commit made from a subfolder is scanned
+  in full. A command that starts with `cd <folder> &&` (or `;`), or uses
+  `git -C <folder>`, is scanned in that folder.
+- `git commit -a` / `-i` / `-o` (or `--all`, `--include`, `--only`, also
+  inside a cluster such as `-am`), or a `git add` / `git stage` earlier in
+  the same command — also scans lines added by unstaged changes to tracked
+  files, and untracked files that aren't git-ignored (piped into
+  `gitleaks stdin`), since these fold in changes `--staged` can't see yet.
+  Removed lines are not scanned, so a commit that deletes a leaked secret
+  goes through. Git-ignored files (build output such as `.next/`) can't be
+  committed and are never scanned.
+- `git push` — scans every commit on a local branch or tag that no remote
+  has yet, so `git push origin <other branch>`, `--all` and `--tags` are
+  covered as well as the current branch. On a first push, with no
+  remote-tracking branches, that is the whole history.
+
+It also refuses to let the scan be switched off from inside the repo or
+the command:
+
+- A `gitleaks:allow` note on a line does not exempt it
+  (`--ignore-gitleaks-allow`).
+- The `GITLEAKS_CONFIG` and `GITLEAKS_CONFIG_TOML` environment variables
+  are ignored.
+- gitleaks reads `.gitleaks.toml` and `.gitleaksignore` from the folder it
+  scans and skips what they say. Copies committed exactly as they are are
+  trusted. A commit or push is refused while either file is new, edited
+  or uncommitted, and a commit that changes either is refused too: you
+  check the change and commit it yourself (with `git commit --no-verify`
+  if the git-level hooks from claude-code-secret-guard are installed).
 
 Trigger matching is deliberately loose (word `git` + word `commit`/`push`
 anywhere in the command). Over-matching just costs one fast scan;
@@ -130,12 +151,18 @@ not been re-tested against a real OpenCode 1 install.
 - Format-based detection: gitleaks matches known secret shapes. A bare
   `password = "…"` in an unknown format can slip through. This raises the
   floor, it's not a guarantee.
-- The `-a` scan reads removed lines too: it scans the raw `git diff` text,
-  so `git commit -am "remove leaked key"` is blocked by the very line being
-  deleted. Stage the change and commit without `-a` instead; the staged
-  scan only looks at added lines.
-- First push of a brand-new branch scans only the tip commit (no upstream
-  to diff against). Commit-time scanning is the primary control.
+- A secret on any unpushed local branch blocks every push, including a
+  push of a different, clean branch. Remove the secret from that branch
+  (or delete the branch) first.
+- Reading the command is approximate. A folder reached any other way than
+  a leading `cd` or `git -C`, a commit through a git alias, or
+  `git commit <path>` with no flag (which commits that file's unstaged
+  changes) is not seen as it really is. The git-level hooks in
+  [claude-code-secret-guard](https://github.com/banterny/claude-code-secret-guard#git-level-hooks-any-agent-or-you)
+  run inside git itself and cover these.
+- Settings files committed before this plugin was installed are trusted
+  as they are. Read a repo's `.gitleaks.toml` and `.gitleaksignore`
+  before relying on the scan there.
 
 ## License
 

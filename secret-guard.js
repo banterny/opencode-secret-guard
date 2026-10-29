@@ -12,43 +12,97 @@
 // guard for OpenCode 1 (1.18.29 and later read it from the same object).
 
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const hasWord = (cmd, w) =>
   new RegExp(`(^|[^a-zA-Z0-9_])${w}([^a-zA-Z0-9_]|$)`).test(cmd);
 
-const isAllFlag = (cmd) =>
-  /(^|\s)(--all|-[a-zA-Z]*a[a-zA-Z]*)(\s|$)/.test(cmd);
+// Changes that are not staged yet but could still end up in this commit:
+// `-a`/`--all`, `-i`/`--include` and `-o`/`--only` (bare or inside a
+// short-flag cluster like `-am`), or a `git add`/`git stage` earlier in the
+// same command, which has not run yet when this hook fires. Matched loosely:
+// an unrelated flag elsewhere in a chained command only costs a wider scan.
+const isWide = (cmd) =>
+  /(^|\s)(--all|--include|--only|-[a-zA-Z]*[aio][a-zA-Z]*)(\s|$)/.test(cmd) ||
+  /(^|[^a-zA-Z0-9_])git(\s+-\S+(\s+[^-\s]\S*)?)*\s+(add|stage)(\s|$)/.test(cmd);
+
+// The folder the command will act on: a leading `cd <dir> &&` (or `;`), then
+// a `git -C <dir>`, each relative to where the command starts. A folder may
+// be quoted. Anything cleverer than that is left to the git-level hooks.
+const DIR = String.raw`(?:"([^"]*)"|'([^']*)'|([^\s;&|"']+))`;
+const CD_RE = new RegExp(String.raw`^\s*cd\s+${DIR}\s*(?:&&|;)`);
+const GIT_C_RE = new RegExp(String.raw`(?:^|[^a-zA-Z0-9_])git\s+-C\s+${DIR}`);
+const expandHome = (d) =>
+  d === "~" ? os.homedir() : d.startsWith("~/") ? path.join(os.homedir(), d.slice(2)) : d;
+function targetDir(cmd, cwd) {
+  let dir = cwd;
+  for (const re of [CD_RE, GIT_C_RE]) {
+    const m = re.exec(cmd);
+    const d = m && (m[1] ?? m[2] ?? m[3]);
+    if (!d) continue;
+    const next = path.resolve(dir, expandHome(d));
+    // A folder that isn't there leaves the command where it started.
+    try {
+      if (statSync(next).isDirectory()) dir = next;
+    } catch {}
+  }
+  return dir;
+}
 
 // The scans are fixed shell scripts, the same commands deny-secret-commit.sh
 // runs. Nothing from the agent's command is ever interpolated into them; the
 // working directory is passed to the process, not written into the script.
-const GITLEAKS_FLAGS = "--no-banner --redact --no-color";
+// A `gitleaks:allow` note on a line does not exempt it.
+const GITLEAKS_FLAGS = "--no-banner --redact --no-color --ignore-gitleaks-allow";
+
+// gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it scans
+// and skips whatever they tell it to, so anyone who can edit them can switch
+// the scan off. Only copies exactly as committed are trusted: this prints
+// any that are new, changed or uncommitted.
+const UNSETTLED_SETTINGS = `for f in .gitleaks.toml .gitleaksignore; do
+  { [ -e "$f" ] || [ -L "$f" ]; } || continue
+  git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
+    git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
+  printf '%s\\n' "$f"
+done`;
+// ...plus any whose staged copy differs from the last commit.
+const COMMIT_SETTINGS = `${UNSETTLED_SETTINGS}
+if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+  git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore
+else
+  git ls-files --cached -- .gitleaks.toml .gitleaksignore
+fi 2>/dev/null`;
 
 const STAGED_SCAN = `gitleaks git --pre-commit --staged ${GITLEAKS_FLAGS} 2>&1`;
 
-// Wider scan: what is not staged yet but could still end up in this commit —
-// unstaged changes to tracked files (`git diff`, which unlike `git diff HEAD`
-// also works before the first commit), plus untracked files that are not
-// git-ignored (a `git add --all` chained ahead of the commit hasn't run yet
-// when this hook fires). Piped into `gitleaks stdin` so only that text is
-// scanned: `detect --no-git --pipe` ignores the pipe and scans the whole
-// folder, git-ignored build output included.
+// Wider scan: lines added by unstaged changes to tracked files (`git diff`,
+// which unlike `git diff HEAD` also works before the first commit; added
+// lines only, so a commit that removes a secret is not refused), plus
+// untracked files that are not git-ignored. Piped into `gitleaks stdin` so
+// only that text is scanned: `detect --no-git --pipe` ignores the pipe and
+// scans the whole folder, git-ignored build output included.
 const WIDER_SCAN = `{
-  git diff --no-ext-diff --no-color
+  git diff --no-ext-diff --no-color -U0 | sed -n 's/^+//p'
   git ls-files --others --exclude-standard -z -- ':/' | xargs -0 cat --
 } 2>/dev/null | gitleaks stdin ${GITLEAKS_FLAGS} 2>&1`;
 
-// Note: `git rev-parse` can print a best-effort guess to stdout even when it
-// exits non-zero, so branch on its exit status, not on the captured string.
-const PUSH_SCAN = `if upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) && [ -n "$upstream" ]; then
-  range="\${upstream}..HEAD"
-elif origin_head=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null) && [ -n "$origin_head" ]; then
-  range="\${origin_head}..HEAD"
-else
-  range="-1"
-fi
-gitleaks git ${GITLEAKS_FLAGS} --log-opts="$range" 2>&1`;
+// Every commit on a local branch or tag that no remote has yet. Reading the
+// command for which branches it pushes is easy to get wrong, so this covers
+// them all; the cost is that a secret on an unpushed branch also blocks
+// pushing another. With no remote-tracking branches at all, that is the
+// whole history, which is what a first push publishes.
+const PUSH_SCAN = `gitleaks git ${GITLEAKS_FLAGS} --log-opts="--branches --tags --not --remotes" 2>&1`;
+
+// gitleaks also takes its settings from these environment variables, which
+// would let them replace the rules the scans rely on.
+function scanEnv() {
+  const env = { ...process.env };
+  delete env.GITLEAKS_CONFIG;
+  delete env.GITLEAKS_CONFIG_TOML;
+  return env;
+}
 
 // Runs a script with `sh` in `cwd`. Resolves to its exit code and output;
 // the code is null if it could not be run at all.
@@ -59,6 +113,7 @@ function sh(script, cwd) {
     try {
       child = spawn("sh", ["-c", script], {
         cwd,
+        env: scanEnv(),
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch {
@@ -71,6 +126,9 @@ function sh(script, cwd) {
     child.on("close", (code) => resolve({ code, out }));
   });
 }
+
+const settingsReason = (files) =>
+  `Blocked by secret-guard: gitleaks's settings file(s) ${[...new Set(files.split("\n").filter(Boolean))].join(" ")} are new or changed, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves.`;
 
 // Returns the reason to block `cmd` when run in `cwd`, or null to allow it.
 // gitleaks exits 1 when it finds a leak; anything else (missing binary, git
@@ -85,23 +143,31 @@ async function blockReason(cmd, cwd) {
   const isPush = hasWord(cmd, "git") && hasWord(cmd, "push");
   if (!isCommit && !isPush) return null;
 
-  // Not inside a git work tree -> allow (matches deny-secret-commit.sh)
-  const inRepo = await sh("git rev-parse --is-inside-work-tree", cwd);
-  if (inRepo.code !== 0) return null;
+  // Not inside a git work tree -> allow (matches deny-secret-commit.sh).
+  // Scans run from the top of the work tree: from a subfolder, gitleaks only
+  // looks at that subfolder's changes, and reads its settings files there.
+  const top = await sh("git rev-parse --show-toplevel", targetDir(cmd, cwd));
+  if (top.code !== 0) return null;
+  const root = top.out.trim();
+  if (!root) return null;
 
   if (isCommit) {
+    const settings = await sh(COMMIT_SETTINGS, root);
+    if (settings.out.trim()) return settingsReason(settings.out);
     // The staged scan always runs, so the wider scan can only add coverage.
-    let scan = await sh(STAGED_SCAN, cwd);
-    if (scan.code !== 1 && isAllFlag(cmd)) scan = await sh(WIDER_SCAN, cwd);
+    let scan = await sh(STAGED_SCAN, root);
+    if (scan.code !== 1 && isWide(cmd)) scan = await sh(WIDER_SCAN, root);
     if (scan.code === 1) {
       return `Blocked by secret-guard: changes being committed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; unstage/revert the file, rotate the credential, and explain the block to the user.\n${scan.out}`;
     }
   }
 
   if (isPush) {
-    const scan = await sh(PUSH_SCAN, cwd);
+    const settings = await sh(UNSETTLED_SETTINGS, root);
+    if (settings.out.trim()) return settingsReason(settings.out);
+    const scan = await sh(PUSH_SCAN, root);
     if (scan.code === 1) {
-      return `Blocked by secret-guard: commit(s) about to be pushed appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user.\n${scan.out}`;
+      return `Blocked by secret-guard: commit(s) on local branches or tags that are not on any remote yet appear to contain a secret (gitleaks detected a match). Do not retry or work around this; rotate the credential and explain the block to the user.\n${scan.out}`;
     }
   }
 

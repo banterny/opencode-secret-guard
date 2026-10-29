@@ -203,6 +203,106 @@ await check("block", r3, 'git commit -am "first"');
 // ---- not a git repo -> allow (skip silently, no crash) ----
 await check("allow", newDir(), 'git commit -am "x"');
 
+// ==== gaps found in review (Oct 2026) ====
+function repoWith(name) {
+  // repo with one commit, in a fresh scratch folder; name may contain spaces
+  const dir = join(newDir(), name);
+  mkdirSync(dir);
+  git(dir, "init", "-q");
+  git(dir, "config", "user.email", "test@test.com");
+  git(dir, "config", "user.name", "test");
+  writeFileSync(join(dir, "README.md"), "hello\n");
+  git(dir, "add", "README.md");
+  git(dir, "commit", "-qm", "init");
+  return dir;
+}
+const ALLOW_ALL = '[allowlist]\npaths = [".*"]\n';
+
+// a gitleaks:allow note on the line does not exempt it
+const g1 = repoWith("allow-note");
+writeFileSync(join(g1, "s.txt"), `TOKEN=${TOK} # gitleaks:allow\n`);
+git(g1, "add", "s.txt");
+await check("block", g1, 'git commit -m "x"');
+
+// gitleaks settings files not committed exactly as they are
+const g2 = repoWith("settings");
+writeFileSync(join(g2, ".gitleaks.toml"), ALLOW_ALL);
+writeFileSync(join(g2, "s.txt"), `TOKEN=${TOK}\n`);
+git(g2, "add", "s.txt");
+await check("block", g2, 'git commit -m "x"');
+await check("block", g2, "git push");
+rmSync(join(g2, ".gitleaks.toml"));
+writeFileSync(join(g2, ".gitleaksignore"), "s.txt:github-pat:1\n");
+await check("block", g2, 'git commit -m "x"');
+rmSync(join(g2, ".gitleaksignore"));
+git(g2, "reset", "-q");
+writeFileSync(join(g2, ".gitleaks.toml"), '[extend]\nuseDefault = true\n[allowlist]\npaths = ["fixtures/"]\n');
+git(g2, "add", ".gitleaks.toml");
+await check("block", g2, 'git commit -m "add scanner settings"');
+git(g2, "commit", "-qm", "settings, committed by the user");
+mkdirSync(join(g2, "fixtures"));
+writeFileSync(join(g2, "fixtures", "sample.txt"), `TOKEN=${TOK}\n`);
+git(g2, "add", "fixtures");
+await check("allow", g2, 'git commit -m "x"'); // committed settings are trusted...
+git(g2, "add", "s.txt");
+await check("block", g2, 'git commit -m "x"'); // ...and skip only what they say
+writeFileSync(join(g2, ".gitleaks.toml"), ALLOW_ALL);
+await check("block", g2, 'git commit -m "x"'); // committed settings, edited in place
+git(g2, "checkout", "-q", "--", ".gitleaks.toml");
+// GITLEAKS_CONFIG in the environment is ignored
+writeFileSync(join(g2, "..", "allow-all.toml"), ALLOW_ALL);
+process.env.GITLEAKS_CONFIG = join(g2, "..", "allow-all.toml");
+await check("block", g2, 'git commit -m "x"');
+delete process.env.GITLEAKS_CONFIG;
+
+// a `git add` earlier in the command; the new file isn't staged yet
+const g3 = repoWith("chained-add");
+writeFileSync(join(g3, "new.txt"), `TOKEN=${TOK}\n`);
+await check("block", g3, 'git add . && git commit -m "x"');
+await check("block", g3, 'git add -A && git commit -m "x"');
+await check("block", g3, 'git stage new.txt && git commit -m "x"');
+await check("block", g3, 'git -C . add new.txt && git commit -m "x"');
+await check("allow", g3, 'git commit -m "add the token later"'); // "add" in a message isn't a git add
+rmSync(join(g3, "new.txt"));
+// removing a committed secret is not refused, even by the wider scan
+writeFileSync(join(g3, "old.txt"), `TOKEN=${TOK}\n`);
+git(g3, "add", "old.txt");
+git(g3, "commit", "-qm", "fixture: a secret committed earlier");
+writeFileSync(join(g3, "old.txt"), "gone\n");
+await check("allow", g3, 'git add . && git commit -m "remove token"');
+await check("allow", g3, 'git commit -am "remove token"');
+
+// commit run from a subfolder, and commands that move into the repo
+const g4 = repoWith("with space");
+mkdirSync(join(g4, "sub"));
+writeFileSync(join(g4, "sub", "a.txt"), "x\n");
+git(g4, "add", "sub");
+git(g4, "commit", "-qm", "layout");
+writeFileSync(join(g4, "root.txt"), `TOKEN=${TOK}\n`);
+git(g4, "add", "root.txt");
+const outside = join(g4, "..");
+await check("block", g4, 'git commit -m "x"', { workdir: "sub" });
+await check("block", g4, `cd "${g4}" && git commit -m x`, { base: outside });
+await check("block", g4, `cd '${g4}'; git commit -m x`, { base: outside });
+await check("block", g4, 'cd "with space" && git commit -m x', { base: outside });
+await check("block", g4, `git -C "${g4}" commit -m x`, { base: outside });
+await check("allow", g4, 'cd "no such folder" && git commit -m x', { base: outside });
+
+// push of a branch other than the current one
+const g5 = repoWith("pushes");
+const remote = join(g5, "..", "remote.git");
+execFileSync("git", ["init", "-q", "--bare", remote], { stdio: "ignore" });
+git(g5, "remote", "add", "origin", remote);
+git(g5, "push", "-q", "origin", "HEAD:main");
+await check("allow", g5, "git push"); // everything is already on the remote
+git(g5, "checkout", "-q", "-b", "feature");
+writeFileSync(join(g5, "s.txt"), `TOKEN=${TOK}\n`);
+git(g5, "add", "s.txt");
+git(g5, "commit", "-qm", "fixture: leak commit");
+git(g5, "checkout", "-q", "-");
+await check("block", g5, "git push origin feature");
+await check("block", g5, "git push --all");
+
 console.log(`\npassed: ${pass}, failed: ${fail}`);
 for (const dir of repos) rmSync(dir, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);

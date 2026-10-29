@@ -23,7 +23,7 @@ export GIT_CONFIG_NOSYSTEM=1
 # real token-shaped string (it would trip gitleaks/GitHub push protection).
 TOK="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
 
-REPO=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX")
+REPO=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX") || exit 1
 cd "$REPO" || exit 1
 git init -q
 git config user.email test@test.com
@@ -104,7 +104,7 @@ check 1 "secret tip commit (push) -> block" gitleaks git --no-banner --redact --
 # name, plus a flag such as `-name`. That is a trigger decision inside the
 # plugin, which test-plugin.mjs covers; at scan level it is the same case
 # as the first check below.)
-REPO2=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX")
+REPO2=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX") || exit 1
 cd "$REPO2" || exit 1
 git init -q
 git config user.email test@test.com
@@ -151,7 +151,7 @@ check 1 "secret tip commit (push) -> block" gitleaks git --no-banner --redact --
 check 1 "secret in pushed range (push) -> block" gitleaks git --no-banner --redact --no-color --log-opts=HEAD~1..HEAD
 
 # ---- repo with no commits yet (no HEAD to diff against) ----
-REPO3=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX")
+REPO3=$(mktemp -d "${TMPDIR:-/tmp}/opencode-secret-guard-test.XXXXXX") || exit 1
 cd "$REPO3" || exit 1
 git init -q
 git config user.email test@test.com
