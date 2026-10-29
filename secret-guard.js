@@ -66,45 +66,87 @@ const GITLEAKS_FLAGS = "--no-banner --redact --no-color --ignore-gitleaks-allow"
 
 // gitleaks reads .gitleaks.toml and .gitleaksignore from the folder it scans
 // and skips whatever they tell it to, so anyone who can edit them can switch
-// the scan off. Only copies exactly as committed are trusted, and never a
-// link, whose target git does not track: this prints any others.
-// A trusted .gitleaks.toml can still pull in another file through
-// `[extend] path`; that file must be inside the repo, trusted the same way,
-// and must not extend anything further. An inline `extend = { ... }` table
-// is reported as "/", which is never trusted.
-const UNSETTLED_SETTINGS = String.raw`is_settled() {
+// the scan off. Only copies exactly as committed are trusted, never a link
+// (git does not track its target). A trusted .gitleaks.toml can still pull in
+// another file through `[extend] path`: that file must be a plain file inside
+// the repo, trusted the same way, and must not extend anything further. The
+// extend reader accepts only the plain TOML form (one `[extend]` header with
+// `useDefault`, `disabledRules` and a plainly quoted `path`); anything else
+// that mentions extend is never trusted. These are the same shell functions
+// deny-secret-commit.sh uses.
+const SETTINGS_FUNCS = String.raw`is_settled() {
   [ ! -L "$1" ] && [ -e "$1" ] &&
     git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
     git diff --quiet HEAD -- "$1" >/dev/null 2>&1
 }
 extend_path() {
   awk -v q="'" -v dq='"' '
-    /^[[:space:]]*[[]/ { s = $0; gsub(/[[:space:]]/, "", s); next }
-    /^[[:space:]]*extend[[:space:]]*=/ { print "/"; exit }
-    s == "[extend]" && /^[[:space:]]*path[[:space:]]*=/ {
-      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v)
-      gsub("^[" dq q "]+|[" dq q "]+$", "", v); print v; exit
-    }' "$1" 2>/dev/null
+    BEGIN {
+      bs = sprintf("%c", 92)
+      str = "(" dq "[^" dq "]*" dq "|" q "[^" q "]*" q ")"
+      item = "^[[:space:]]*(" str "[[:space:]]*,?[[:space:]]*)*[]]?[[:space:]]*(#.*)?$"
+      other = "(^|[[:space:].{,]|" dq "|" q ")extend(" dq "|" q ")?[[:space:]]*[.=]"
+    }
+    { l = tolower($0) }
+    l ~ /^[[:space:]]*(#.*)?$/ { next }
+    l ~ /^[[:space:]]*[[]/ {
+      h = l; sub(/#.*/, "", h); gsub(/[[:space:]]/, "", h)
+      if (h == "[extend]") { sec = "extend"; seen++; next }
+      if (h ~ /extend/) { bad = 1; exit }
+      sec = ""; next
+    }
+    sec == "extend" {
+      if (l ~ /^[[:space:]]*(usedefault|disabledrules)[[:space:]]*=/) next
+      if (l ~ /^[[:space:]]*path[[:space:]]*=/) {
+        v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
+        c = substr(v, 1, 1); rest = substr(v, 2); e = index(rest, c)
+        if (path != "" || (c != dq && c != q) || e < 2) { bad = 1; exit }
+        path = substr(rest, 1, e - 1)
+        if (index(path, bs) || substr(rest, e + 1) !~ /^[[:space:]]*(#.*)?$/) { bad = 1; exit }
+        next
+      }
+      if (l ~ item) next
+      bad = 1; exit
+    }
+    l ~ other { bad = 1; exit }
+    END { if (bad || seen > 1) print "/"; else if (path != "") print path }
+  ' < "$1"
 }
-for f in .gitleaks.toml .gitleaksignore; do
-  { [ -e "$f" ] || [ -L "$f" ]; } || continue
-  is_settled "$f" || printf '%s\n' "$f"
-done
-if [ -f .gitleaks.toml ]; then
-  p=$(extend_path .gitleaks.toml)
-  case "$p" in
-    "") ;;
-    /*|"~"*|*..*) printf '%s\n' .gitleaks.toml ;;
-    *) { is_settled "$p" && [ -z "$(extend_path "$p")" ]; } || printf '%s\n' .gitleaks.toml ;;
-  esac
-fi`;
-// ...plus any whose staged copy differs from the last commit.
-const COMMIT_SETTINGS = `${UNSETTLED_SETTINGS}
-if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
-  git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore
-else
-  git ls-files --cached -- .gitleaks.toml .gitleaksignore
-fi 2>/dev/null`;
+extended_file() {
+  [ -f .gitleaks.toml ] || return 0
+  x=$(extend_path .gitleaks.toml) || return 0
+  case "$x" in ""|/*|"~"*|-*|*..*) ;; *) printf '%s\n' "$x" ;; esac
+}
+unsettled_settings() {
+  for f in .gitleaks.toml .gitleaksignore; do
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    is_settled "$f" || printf '%s\n' "$f"
+  done
+  if [ -f .gitleaks.toml ]; then
+    p=$(extend_path .gitleaks.toml) || p=/
+    case "$p" in
+      "") ;;
+      /*|"~"*|-*|*..*) printf '%s\n' .gitleaks.toml ;;
+      *) { [ -f "$p" ] && is_settled "$p" && pp=$(extend_path "$p") && [ -z "$pp" ]; } ||
+        printf '%s\n' .gitleaks.toml ;;
+    esac
+  fi
+}
+staged_settings() {
+  x=$(extended_file)
+  if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    git diff --cached --name-only HEAD -- .gitleaks.toml .gitleaksignore ${"${"}x:+"$x"} 2>/dev/null
+  else
+    git ls-files --cached -- .gitleaks.toml .gitleaksignore ${"${"}x:+"$x"} 2>/dev/null
+  fi
+}
+`;
+// Settings files that are not trusted.
+const UNSETTLED_SETTINGS = `${SETTINGS_FUNCS}unsettled_settings`;
+// ...plus any, or the file .gitleaks.toml pulls in, whose staged copy
+// differs from the last commit.
+const COMMIT_SETTINGS = `${SETTINGS_FUNCS}unsettled_settings
+staged_settings`;
 
 const STAGED_SCAN = `gitleaks git --pre-commit --staged ${GITLEAKS_FLAGS} 2>&1`;
 

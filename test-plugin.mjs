@@ -358,6 +358,34 @@ await check("allow", g8, 'git commit -m "x"');
 writeFileSync(join(g8, "cfg", "base.toml"), ALLOW_ALL);
 await check("block", g8, 'git commit -m "x"'); // the extended file, edited in place
 git(g8, "checkout", "-q", "--", "cfg/base.toml");
+git(g8, "reset", "-q");
+// a commit that stages a change to the extended file, with the working copy
+// put back as committed
+const baseToml = '[extend]\nuseDefault = true\n[allowlist]\npaths = ["fixtures/"]\n';
+writeFileSync(join(g8, "cfg", "base.toml"), ALLOW_ALL);
+git(g8, "add", "cfg/base.toml");
+writeFileSync(join(g8, "cfg", "base.toml"), baseToml);
+await check("block", g8, 'git commit -m "tweak scanner settings"');
+git(g8, "reset", "-q");
+
+// other spellings of extend that gitleaks honours
+const g10 = repoWith("dotted-extend");
+const outside3 = join(g10, "..", "outside3.toml");
+writeFileSync(outside3, ALLOW_ALL);
+writeFileSync(join(g10, ".gitleaks.toml"), `extend.path = "${outside3}"\n`);
+git(g10, "add", ".gitleaks.toml");
+git(g10, "commit", "-qm", "fixture: dotted extend key");
+writeFileSync(join(g10, "s.txt"), `TOKEN=${TOK}\n`);
+git(g10, "add", "s.txt");
+await check("block", g10, 'git commit -m "x"');
+git(g10, "reset", "-q");
+// an extended file whose name contains "=" is still read
+writeFileSync(join(g10, "a=b.toml"), `[extend]\npath = "${outside3}"\n`);
+writeFileSync(join(g10, ".gitleaks.toml"), '[extend]\npath = "a=b.toml"\n');
+git(g10, "add", "a=b.toml", ".gitleaks.toml");
+git(g10, "commit", "-qm", "fixture: extend a file named with =");
+git(g10, "add", "s.txt");
+await check("block", g10, 'git commit -m "x"');
 
 // push while HEAD is a new, empty branch
 const g9 = repoWith("unborn");
