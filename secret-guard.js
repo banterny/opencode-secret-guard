@@ -68,13 +68,36 @@ const GITLEAKS_FLAGS = "--no-banner --redact --no-color --ignore-gitleaks-allow"
 // and skips whatever they tell it to, so anyone who can edit them can switch
 // the scan off. Only copies exactly as committed are trusted, and never a
 // link, whose target git does not track: this prints any others.
-const UNSETTLED_SETTINGS = `for f in .gitleaks.toml .gitleaksignore; do
-  [ -L "$f" ] && { printf '%s\\n' "$f"; continue; }
-  [ -e "$f" ] || continue
-  git ls-files --error-unmatch -- "$f" >/dev/null 2>&1 &&
-    git diff --quiet HEAD -- "$f" >/dev/null 2>&1 && continue
-  printf '%s\\n' "$f"
-done`;
+// A trusted .gitleaks.toml can still pull in another file through
+// `[extend] path`; that file must be inside the repo, trusted the same way,
+// and must not extend anything further. An inline `extend = { ... }` table
+// is reported as "/", which is never trusted.
+const UNSETTLED_SETTINGS = String.raw`is_settled() {
+  [ ! -L "$1" ] && [ -e "$1" ] &&
+    git ls-files --error-unmatch -- "$1" >/dev/null 2>&1 &&
+    git diff --quiet HEAD -- "$1" >/dev/null 2>&1
+}
+extend_path() {
+  awk -v q="'" -v dq='"' '
+    /^[[:space:]]*[[]/ { s = $0; gsub(/[[:space:]]/, "", s); next }
+    /^[[:space:]]*extend[[:space:]]*=/ { print "/"; exit }
+    s == "[extend]" && /^[[:space:]]*path[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v)
+      gsub("^[" dq q "]+|[" dq q "]+$", "", v); print v; exit
+    }' "$1" 2>/dev/null
+}
+for f in .gitleaks.toml .gitleaksignore; do
+  { [ -e "$f" ] || [ -L "$f" ]; } || continue
+  is_settled "$f" || printf '%s\n' "$f"
+done
+if [ -f .gitleaks.toml ]; then
+  p=$(extend_path .gitleaks.toml)
+  case "$p" in
+    "") ;;
+    /*|"~"*|*..*) printf '%s\n' .gitleaks.toml ;;
+    *) { is_settled "$p" && [ -z "$(extend_path "$p")" ]; } || printf '%s\n' .gitleaks.toml ;;
+  esac
+fi`;
 // ...plus any whose staged copy differs from the last commit.
 const COMMIT_SETTINGS = `${UNSETTLED_SETTINGS}
 if git rev-parse -q --verify HEAD >/dev/null 2>&1; then
@@ -101,8 +124,12 @@ const WIDER_SCAN = `{
 // pushes is easy to get wrong, so this covers them all; the cost is that a
 // secret on an unpushed branch also blocks pushing another. With no
 // remote-tracking branches at all, that is the whole history, which is what
-// a first push publishes.
-const PUSH_SCAN = `gitleaks git ${GITLEAKS_FLAGS} --log-opts="HEAD --branches --tags --not --remotes" 2>&1`;
+// a first push publishes. HEAD is left out when it has no commit yet (a new,
+// empty branch): git would refuse the whole list, and the scan would find
+// nothing.
+const PUSH_SCAN = `revs="--branches --tags"
+git rev-parse -q --verify HEAD >/dev/null 2>&1 && revs="HEAD $revs"
+gitleaks git ${GITLEAKS_FLAGS} --log-opts="$revs --not --remotes" 2>&1`;
 
 // gitleaks also takes its settings from these environment variables, which
 // would let them replace the rules the scans rely on.
@@ -137,7 +164,7 @@ function sh(script, cwd) {
 }
 
 const settingsReason = (files) =>
-  `Blocked by secret-guard: gitleaks's settings file(s) ${[...new Set(files.split("\n").filter(Boolean))].join(" ")} are new, changed or a link, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves.`;
+  `Blocked by secret-guard: gitleaks's settings file(s) ${[...new Set(files.split("\n").filter(Boolean))].join(" ")} are new, changed or a link, pull in a file that is, or this commit changes them. gitleaks reads these files to decide what to skip, so a change to them can switch the secret scan off. Do not edit, delete or work around them; explain the block to the user, who can check the change and commit it themselves.`;
 
 // Returns the reason to block `cmd` when run in `cwd`, or null to allow it.
 // gitleaks exits 1 when it finds a leak; anything else (missing binary, git

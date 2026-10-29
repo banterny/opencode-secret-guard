@@ -332,6 +332,42 @@ writeFileSync(join(g7, "s.txt"), `TOKEN=${TOK}\n`);
 git(g7, "add", "s.txt");
 await check("block", g7, 'git commit -m "x"');
 
+// a committed settings file that pulls in a file outside the repo
+const g8 = repoWith("extended-settings");
+const outside2 = join(g8, "..", "outside2.toml");
+writeFileSync(outside2, "[extend]\nuseDefault = true\n");
+writeFileSync(join(g8, ".gitleaks.toml"), `[extend]\npath = "${outside2}"\n`);
+git(g8, "add", ".gitleaks.toml");
+git(g8, "commit", "-qm", "fixture: settings extend an outside file");
+writeFileSync(outside2, ALLOW_ALL);
+writeFileSync(join(g8, "s.txt"), `TOKEN=${TOK}\n`);
+git(g8, "add", "s.txt");
+await check("block", g8, 'git commit -m "x"');
+git(g8, "reset", "-q");
+rmSync(join(g8, "s.txt"));
+// ...while one inside the repo, committed as it is, is trusted
+mkdirSync(join(g8, "cfg"));
+mkdirSync(join(g8, "fixtures"));
+writeFileSync(join(g8, "cfg", "base.toml"), '[extend]\nuseDefault = true\n[allowlist]\npaths = ["fixtures/"]\n');
+writeFileSync(join(g8, ".gitleaks.toml"), '[extend]\npath = "cfg/base.toml"\n');
+git(g8, "add", "cfg", ".gitleaks.toml");
+git(g8, "commit", "-qm", "fixture: settings extend a file in the repo");
+writeFileSync(join(g8, "fixtures", "f.txt"), `TOKEN=${TOK}\n`);
+git(g8, "add", "fixtures");
+await check("allow", g8, 'git commit -m "x"');
+writeFileSync(join(g8, "cfg", "base.toml"), ALLOW_ALL);
+await check("block", g8, 'git commit -m "x"'); // the extended file, edited in place
+git(g8, "checkout", "-q", "--", "cfg/base.toml");
+
+// push while HEAD is a new, empty branch
+const g9 = repoWith("unborn");
+git(g9, "checkout", "-q", "-b", "leaky");
+writeFileSync(join(g9, "s.txt"), `TOKEN=${TOK}\n`);
+git(g9, "add", "s.txt");
+git(g9, "commit", "-qm", "fixture: leak commit");
+git(g9, "checkout", "-q", "--orphan", "empty");
+await check("block", g9, "git push origin leaky");
+
 console.log(`\npassed: ${pass}, failed: ${fail}`);
 for (const dir of repos) rmSync(dir, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);
