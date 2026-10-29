@@ -81,25 +81,50 @@ const SETTINGS_FUNCS = String.raw`is_settled() {
 }
 extend_path() {
   awk -v q="'" -v dq='"' '
-    function count(s, d,   n, i) {
-      n = 0
-      while ((i = index(s, d)) > 0) { n++; s = substr(s, i + length(d)) }
-      return n
+    function strings(s, d,   i, seg) {
+      i = index(s, d)
+      if (substr(s, 1, i - 1) !~ before) { bad = 1; return 0 }
+      s = substr(s, i + 3)
+      while (1) {
+        i = index(s, d)
+        if (i == 0) return 1
+        seg = substr(s, 1, i - 1)
+        if (d == dq3 && substr(seg, length(seg), 1) == bs) { bad = 1; return 0 }
+        s = substr(s, i + 3)
+        i = index(s, d)
+        if (i == 0) { if (s !~ after) bad = 1; return 0 }
+        if (substr(s, 1, i - 1) !~ between) { bad = 1; return 0 }
+        s = substr(s, i + 3)
+      }
     }
     BEGIN {
       bs = sprintf("%c", 92); sq3 = q q q; dq3 = dq dq dq
       str = "(" dq "[^" dq "]*" dq "|" q "[^" q "]*" q ")"
       item = "^[[:space:]]*(" str "[[:space:]]*,?[[:space:]]*)*[]]?[[:space:]]*(#.*)?$"
       other = "(^|[[:space:].{,]|" dq "|" q ")extend(" dq "|" q ")?[[:space:]]*[.=]"
+      before = "^[[:space:]]*([A-Za-z0-9_.-]+[[:space:]]*=[[:space:]]*)?[[]?[[:space:]]*$"
+      between = "^[[:space:]]*,[[:space:]]*$"
+      after = "^[[:space:]]*,?[[:space:]]*[]]?[[:space:]]*,?[[:space:]]*(#[^" q dq "]*)?$"
     }
-    inml { if (count($0, delim) % 2) inml = 0; next }
+    inml {
+      i = index($0, delim)
+      if (i == 0) next
+      if (delim == dq3 && i > 1 && substr($0, i - 1, 1) == bs) { bad = 1; exit }
+      rest = substr($0, i + 3)
+      if (index(rest, sq3) || index(rest, dq3) || rest !~ after) { bad = 1; exit }
+      inml = 0; next
+    }
     {
       l = tolower($0)
-      ns = count($0, sq3); nd = count($0, dq3)
-      if (sec == "extend" && (ns || nd)) { bad = 1; exit }
+      ns = index($0, sq3); nd = index($0, dq3)
+      if (ns || nd) {
+        if (sec == "extend" || (ns && nd)) { bad = 1; exit }
+        delim = ns ? sq3 : dq3
+        if (strings($0, delim)) inml = 1
+        if (bad) exit
+      }
       k = $0; sub(/=.*/, "", k)
       if (index(k, bs "u") || index(k, bs "U")) { bad = 1; exit }
-      if (ns % 2) { inml = 1; delim = sq3 } else if (nd % 2) { inml = 1; delim = dq3 }
     }
     l ~ /^[[:space:]]*(#.*)?$/ { next }
     l ~ /^[[:space:]]*[[]/ {

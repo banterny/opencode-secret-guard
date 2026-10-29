@@ -405,6 +405,12 @@ git(g11, "commit", "-qm", "fixture: extend key spelled with an escape");
 git(g11, "add", "s.txt");
 await check("block", g11, 'git commit -m "x"');
 git(g11, "reset", "-q");
+writeFileSync(join(g11, ".gitleaks.toml"), `# '''\n[extend]\npath = "${outside4}"\n# '''\n`);
+git(g11, "add", ".gitleaks.toml");
+git(g11, "commit", "-qm", "fixture: triple quotes in comments around the extend path");
+git(g11, "add", "s.txt");
+await check("block", g11, 'git commit -m "x"');
+git(g11, "reset", "-q");
 // a path that is also a git pattern (*.toml) is taken as a plain name
 writeFileSync(join(g11, "base.toml"), "[extend]\nuseDefault = true\n");
 writeFileSync(join(g11, ".gitleaks.toml"), '[extend]\npath = "*.toml"\n');
