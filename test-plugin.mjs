@@ -386,6 +386,33 @@ git(g10, "add", "a=b.toml", ".gitleaks.toml");
 git(g10, "commit", "-qm", "fixture: extend a file named with =");
 git(g10, "add", "s.txt");
 await check("block", g10, 'git commit -m "x"');
+git(g10, "reset", "-q");
+
+// more disguises gitleaks honours
+const g11 = repoWith("disguised-extend");
+const outside4 = join(g11, "..", "outside4.toml");
+writeFileSync(outside4, ALLOW_ALL);
+writeFileSync(join(g11, ".gitleaks.toml"), `[extend]\ndisabledRules = '''\n[allowlist]\n'''\npath = "${outside4}"\n`);
+git(g11, "add", ".gitleaks.toml");
+git(g11, "commit", "-qm", "fixture: triple-quoted disabledRules hiding a header");
+writeFileSync(join(g11, "s.txt"), `TOKEN=${TOK}\n`);
+git(g11, "add", "s.txt");
+await check("block", g11, 'git commit -m "x"');
+git(g11, "reset", "-q");
+writeFileSync(join(g11, ".gitleaks.toml"), `"ext\\u0065nd".path = "${outside4}"\n`);
+git(g11, "add", ".gitleaks.toml");
+git(g11, "commit", "-qm", "fixture: extend key spelled with an escape");
+git(g11, "add", "s.txt");
+await check("block", g11, 'git commit -m "x"');
+git(g11, "reset", "-q");
+// a path that is also a git pattern (*.toml) is taken as a plain name
+writeFileSync(join(g11, "base.toml"), "[extend]\nuseDefault = true\n");
+writeFileSync(join(g11, ".gitleaks.toml"), '[extend]\npath = "*.toml"\n');
+git(g11, "add", "base.toml", ".gitleaks.toml");
+git(g11, "commit", "-qm", "fixture: extend path that looks like a pattern");
+writeFileSync(join(g11, "*.toml"), ALLOW_ALL);
+git(g11, "add", "s.txt");
+await check("block", g11, 'git commit -m "x"');
 
 // push while HEAD is a new, empty branch
 const g9 = repoWith("unborn");
